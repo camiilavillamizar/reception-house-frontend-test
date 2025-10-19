@@ -7,29 +7,28 @@ on:
 
 jobs:
   build:
-    name: Build (standalone)
+    name: Build (standalone → zip)
     runs-on: ubuntu-latest
     permissions:
       contents: read
 
     steps:
-      # 1) Fetch repository
+      # 1) Get repo
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Set Node.js version (match Azure)
+      # 2) Node 20 (match Azure)
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20.x'
 
-      # 3) Setup pnpm (and add it to PATH)
+      # 3) pnpm 9 + cache
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 9
 
-      # 4) Cache pnpm store to speed up installs
       - name: Cache pnpm store
         uses: actions/cache@v4
         with:
@@ -38,32 +37,21 @@ jobs:
           restore-keys: |
             pnpm-${{ runner.os }}-
 
-      # 5) Install deps (CI-safe, uses lockfile)
+      # 4) Install using lockfile
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # 6) Optional: turn off Next telemetry in CI
+      # 5) Disable Next telemetry (optional)
       - name: Disable Next telemetry
         run: npx next telemetry disable
 
-      # 7) Build in standalone mode
-      #    NOTE: ensure next.config.js has: module.exports = { output: 'standalone' }
+      # 6) Build standalone (ensure next.config.js has: output: 'standalone')
       - name: Build
         env:
           CI: true
         run: pnpm build
 
-      # 8) Verify build artifacts exist (basic sanity checks)
-      - name: Verify standalone artifacts
-        run: |
-          test -d ".next/standalone" || (echo "❌ .next/standalone missing"; exit 1)
-          test -f ".next/standalone/server.js" || (echo "❌ server.js missing in standalone output"; exit 1)
-          test -d ".next/static" || (echo "❌ .next/static missing"; exit 1)
-          node -v && pnpm -v
-          du -sh .next || true
-
-      # 9) Prepare minimal deploy bundle
-      #    We ship only what Azure needs to run: standalone server, static assets, and public/
+      # 7) Prepare deploy bundle (exactly what Azure will run)
       - name: Prepare deploy folder
         run: |
           rm -rf deploy
@@ -71,10 +59,9 @@ jobs:
           cp -R .next/standalone/* deploy/
           cp -R .next/static deploy/.next/static
           cp -R public deploy/public 2>/dev/null || true
-          # Optional: include package.json (not required to run, but nice for metadata)
           cp package.json deploy/
 
-      # 10) Verify deploy folder contents
+      # 8) Sanity check & list
       - name: Verify deploy folder
         run: |
           test -f "deploy/server.js" || (echo "❌ deploy/server.js not found"; exit 1)
@@ -82,12 +69,20 @@ jobs:
           du -sh deploy || true
           ls -la deploy | head -n 50
 
-      # 11) Upload artifact to pass to deploy job
-      - name: Upload artifact
+      # 9) Zip bundle (preserves .next/ paths)
+      - name: Archive deploy folder
+        run: |
+          cd deploy
+          zip -r ../deploy.zip .
+          cd ..
+          ls -lh deploy.zip
+
+      # 10) Upload zip as artifact
+      - name: Upload artifact (zip)
         uses: actions/upload-artifact@v4
         with:
-          name: next-standalone
-          path: deploy
+          name: next-standalone-zip
+          path: deploy.zip
           if-no-files-found: error
           retention-days: 7
 
@@ -96,25 +91,24 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     permissions:
-      id-token: write     # needed for azure/login OIDC
+      id-token: write     # for azure/login OIDC
       contents: read
 
     steps:
-      # 1) Download the build artifact produced above
+      # 1) Download the zip produced in build job
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: next-standalone
+          name: next-standalone-zip
           path: .
 
-      # 2) Quick sanity check before deploying
+      # 2) Quick check
       - name: Verify artifact before deploy
         run: |
-          test -f "server.js" || (echo "❌ server.js missing in artifact"; exit 1)
-          test -d ".next/static" || (echo "❌ .next/static missing in artifact"; exit 1)
-          du -sh . || true
+          test -f "deploy.zip" || (echo "❌ deploy.zip missing"; exit 1)
+          ls -lh deploy.zip
 
-      # 3) Authenticate to Azure using OIDC + your secrets
+      # 3) Auth to Azure
       - name: Login to Azure
         uses: azure/login@v2
         with:
@@ -122,10 +116,10 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      # 4) Deploy artifact to your App Service
+      # 4) Deploy ZIP to your App Service
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
-          app-name: 'reception-house-frontend'   # <-- Your App Service name
+          app-name: 'reception-house-frontend'   # <- your App Service name
           slot-name: 'Production'
-          package: .                              # Deploy the prepared artifact directory
+          package: deploy.zip

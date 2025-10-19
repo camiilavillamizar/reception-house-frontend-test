@@ -91,7 +91,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     permissions:
-      id-token: write     # for azure/login OIDC
+      id-token: write     # required by azure/login
       contents: read
 
     steps:
@@ -108,13 +108,13 @@ jobs:
           test -f "deploy.zip" || (echo "❌ deploy.zip missing"; exit 1)
           ls -lh deploy.zip
 
-      # 3) Auth to Azure
+      # 3) Auth to Azure (using the exact secrets Azure created for your repo)
       - name: Login to Azure
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_EA0423EEA1104702A92BD6A83761A8A0 }}
+          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_D9A7B31FCBFD4F19B99B5DD938A09738 }}
+          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_E66F17BB1EF64DE1971F9FCAAD0280CF }}
 
       # 4) Deploy ZIP to your App Service
       - name: Deploy to Azure Web App

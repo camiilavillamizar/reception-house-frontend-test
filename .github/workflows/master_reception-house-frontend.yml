@@ -1,65 +1,131 @@
-# Docs for the Azure Web Apps Deploy action: https://github.com/Azure/webapps-deploy
-# More GitHub Actions for Azure: https://github.com/Azure/actions
-
-name: Build and deploy Node.js app to Azure Web App - reception-house-frontend
+name: Build & Deploy Next.js (standalone) to Azure Web App
 
 on:
   push:
-    branches:
-      - master
+    branches: [ master ]
   workflow_dispatch:
 
 jobs:
   build:
+    name: Build (standalone)
     runs-on: ubuntu-latest
     permissions:
-      contents: read #This is required for actions/checkout
+      contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      # 1) Fetch repository
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Set up Node.js version
-        uses: actions/setup-node@v3
+      # 2) Set Node.js version (match Azure)
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: '20.x'
 
-      - name: npm install, build, and test
-        run: |
-          npm install
-          npm run build --if-present
-          npm run test --if-present
+      # 3) Setup pnpm (and add it to PATH)
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
 
-      - name: Upload artifact for deployment job
+      # 4) Cache pnpm store to speed up installs
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.pnpm-store
+          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            pnpm-${{ runner.os }}-
+
+      # 5) Install deps (CI-safe, uses lockfile)
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 6) Optional: turn off Next telemetry in CI
+      - name: Disable Next telemetry
+        run: npx next telemetry disable
+
+      # 7) Build in standalone mode
+      #    NOTE: ensure next.config.js has: module.exports = { output: 'standalone' }
+      - name: Build
+        env:
+          CI: true
+        run: pnpm build
+
+      # 8) Verify build artifacts exist (basic sanity checks)
+      - name: Verify standalone artifacts
+        run: |
+          test -d ".next/standalone" || (echo "❌ .next/standalone missing"; exit 1)
+          test -f ".next/standalone/server.js" || (echo "❌ server.js missing in standalone output"; exit 1)
+          test -d ".next/static" || (echo "❌ .next/static missing"; exit 1)
+          node -v && pnpm -v
+          du -sh .next || true
+
+      # 9) Prepare minimal deploy bundle
+      #    We ship only what Azure needs to run: standalone server, static assets, and public/
+      - name: Prepare deploy folder
+        run: |
+          rm -rf deploy
+          mkdir -p deploy/.next
+          cp -R .next/standalone/* deploy/
+          cp -R .next/static deploy/.next/static
+          cp -R public deploy/public 2>/dev/null || true
+          # Optional: include package.json (not required to run, but nice for metadata)
+          cp package.json deploy/
+
+      # 10) Verify deploy folder contents
+      - name: Verify deploy folder
+        run: |
+          test -f "deploy/server.js" || (echo "❌ deploy/server.js not found"; exit 1)
+          test -d "deploy/.next/static" || (echo "❌ deploy/.next/static not found"; exit 1)
+          du -sh deploy || true
+          ls -la deploy | head -n 50
+
+      # 11) Upload artifact to pass to deploy job
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: node-app
-          path: .
+          name: next-standalone
+          path: deploy
+          if-no-files-found: error
+          retention-days: 7
 
   deploy:
+    name: Deploy to Azure App Service
     runs-on: ubuntu-latest
     needs: build
     permissions:
-      id-token: write #This is required for requesting the JWT
-      contents: read #This is required for actions/checkout
+      id-token: write     # needed for azure/login OIDC
+      contents: read
 
     steps:
-      - name: Download artifact from build job
+      # 1) Download the build artifact produced above
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: node-app
-      
+          name: next-standalone
+          path: .
+
+      # 2) Quick sanity check before deploying
+      - name: Verify artifact before deploy
+        run: |
+          test -f "server.js" || (echo "❌ server.js missing in artifact"; exit 1)
+          test -d ".next/static" || (echo "❌ .next/static missing in artifact"; exit 1)
+          du -sh . || true
+
+      # 3) Authenticate to Azure using OIDC + your secrets
       - name: Login to Azure
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_EA0423EEA1104702A92BD6A83761A8A0 }}
-          tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_D9A7B31FCBFD4F19B99B5DD938A09738 }}
-          subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_E66F17BB1EF64DE1971F9FCAAD0280CF }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: 'Deploy to Azure Web App'
-        id: deploy-to-webapp
+      # 4) Deploy artifact to your App Service
+      - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
-          app-name: 'reception-house-frontend'
+          app-name: 'reception-house-frontend'   # <-- Your App Service name
           slot-name: 'Production'
-          package: .
-          
+          package: .                              # Deploy the prepared artifact directory

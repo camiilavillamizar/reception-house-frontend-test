@@ -1,125 +1,82 @@
-name: Build & Deploy Next.js (standalone) to Azure Web App
+name: Deploy Next.js (pnpm + Oryx) to Azure App Service - reception-house-frontend
 
 on:
   push:
     branches: [ master ]
   workflow_dispatch:
 
+env:
+  APP_NAME: reception-house-frontend
+
 jobs:
-  build:
-    name: Build (standalone → zip)
+  package-source:
     runs-on: ubuntu-latest
     permissions:
       contents: read
 
     steps:
-      # 1) Get repo
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Node 20 (match Azure)
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20.x'
-
-      # 3) pnpm 9 + cache
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - name: Cache pnpm store
-        uses: actions/cache@v4
-        with:
-          path: ~/.pnpm-store
-          key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
-          restore-keys: |
-            pnpm-${{ runner.os }}-
-
-      # 4) Install using lockfile
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      # 5) Disable Next telemetry (optional)
-      - name: Disable Next telemetry
-        run: npx next telemetry disable
-
-      # 6) Build standalone (ensure next.config.js has: output: 'standalone')
-      - name: Build
-        env:
-          CI: true
-        run: pnpm build
-
-      # 7) Prepare deploy bundle (exactly what Azure will run)
-      - name: Prepare deploy folder
+      # (Opcional) Garantiza que exista ecosystem.config.js en la raíz.
+      - name: Ensure ecosystem.config.js exists
         run: |
-          rm -rf deploy
-          mkdir -p deploy/.next
-          cp -R .next/standalone/* deploy/
-          cp -R .next/static deploy/.next/static
-          cp -R public deploy/public 2>/dev/null || true
-          cp package.json deploy/
+          if [ ! -f ecosystem.config.js ]; then
+            cat > ecosystem.config.js << 'EOF'
+            module.exports = {
+              apps: [
+                {
+                  name: "reception-house-frontend",
+                  script: "node_modules/next/dist/bin/next",
+                  args: "start",
+                  cwd: __dirname,
+                  env: { PORT: process.env.PORT || 3000, NODE_ENV: "production" },
+                  instances: "1",
+                  autorestart: true,
+                  watch: false,
+                  max_memory_restart: "512M"
+                }
+              ]
+            };
+            EOF
+          fi
 
-      # 8) Sanity check & list
-      - name: Verify deploy folder
+      # Empaqueta SOLO el código fuente (raíz), sin node_modules ni .next
+      - name: Zip source (root app)
         run: |
-          test -f "deploy/server.js" || (echo "❌ deploy/server.js not found"; exit 1)
-          test -d "deploy/.next/static" || (echo "❌ deploy/.next/static not found"; exit 1)
-          du -sh deploy || true
-          ls -la deploy | head -n 50
+          zip -r release.zip . \
+            -x "node_modules/**" ".next/**" ".git/**" ".github/**"
 
-      # 9) Zip bundle (preserves .next/ paths)
-      - name: Archive deploy folder
-        run: |
-          cd deploy
-          zip -r ../deploy.zip .
-          cd ..
-          ls -lh deploy.zip
-
-      # 10) Upload zip as artifact
-      - name: Upload artifact (zip)
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: next-standalone-zip
-          path: deploy.zip
-          if-no-files-found: error
-          retention-days: 7
+          name: source-zip
+          path: release.zip
 
   deploy:
-    name: Deploy to Azure App Service
     runs-on: ubuntu-latest
-    needs: build
+    needs: package-source
     permissions:
-      id-token: write     # required by azure/login
+      id-token: write
       contents: read
 
     steps:
-      # 1) Download the zip produced in build job
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: next-standalone-zip
+          name: source-zip
           path: .
 
-      # 2) Quick check
-      - name: Verify artifact before deploy
-        run: |
-          test -f "deploy.zip" || (echo "❌ deploy.zip missing"; exit 1)
-          ls -lh deploy.zip
-
-      # 3) Auth to Azure (using the exact secrets Azure created for your repo)
-      - name: Login to Azure
+      - name: Azure Login (federated)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZUREAPPSERVICE_CLIENTID_EA0423EEA1104702A92BD6A83761A8A0 }}
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_D9A7B31FCBFD4F19B99B5DD938A09738 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_E66F17BB1EF64DE1971F9FCAAD0280CF }}
 
-      # 4) Deploy ZIP to your App Service
-      - name: Deploy to Azure Web App
+      - name: Deploy to Azure Web App (ZipDeploy -> Oryx remote build)
         uses: azure/webapps-deploy@v3
         with:
-          app-name: 'reception-house-frontend'   # <- your App Service name
+          app-name: ${{ env.APP_NAME }}
           slot-name: 'Production'
-          package: deploy.zip
+          package: release.zip

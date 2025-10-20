@@ -18,30 +18,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # (Opcional) Garantiza que exista ecosystem.config.js en la raíz.
-      - name: Ensure ecosystem.config.js exists
+      # Verifica que el ecosystem exista en la RAÍZ del repo
+      - name: Verify ecosystem.config.js
         run: |
-          if [ ! -f ecosystem.config.js ]; then
-            cat > ecosystem.config.js << 'EOF'
-            module.exports = {
-              apps: [
-                {
-                  name: "reception-house-frontend",
-                  script: "node_modules/next/dist/bin/next",
-                  args: "start",
-                  cwd: __dirname,
-                  env: { PORT: process.env.PORT || 3000, NODE_ENV: "production" },
-                  instances: "1",
-                  autorestart: true,
-                  watch: false,
-                  max_memory_restart: "512M"
-                }
-              ]
-            };
-            EOF
-          fi
+          ls -la
+          test -f ecosystem.config.js || (echo "ecosystem.config.js NOT FOUND at repo root" && exit 1)
+          echo "ecosystem.config.js found ✅"
 
-      # Empaqueta SOLO el código fuente (raíz), sin node_modules ni .next
+      # Empaqueta SOLO el código fuente (sin node_modules ni .next)
       - name: Zip source (root app)
         run: |
           zip -r release.zip . \
